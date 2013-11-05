@@ -1024,10 +1024,22 @@ enum {
    ARP_TRANS_KEY_BUTTON,
    ARP_TRANS_KEY_MIDI
 };
+enum {
+  ARP_REBUILD_NOW = 1,
+  ARP_REBUILD_PENDING = 2
+};
 byte arpTransKey;
 byte arpTransposeLoopMode;
 byte arpRandSeed;
 byte arpRebuild;          // whether the sequence needs to be rebuilt
+byte arpDelayRebuild;
+byte arpFlags;
+enum {
+    ARP_FLAG_DELAY_REBUILD = 0x01,  // delay chord rebuild until the end of pattern after new notes are presse
+    ARP_FLAG_HOLD_CONTINUE = 0x02,  // in hold mode continue play from current position when a new chord is played
+    ARP_FLAG_LOOP_AT_PLEN  = 0x04   // constrain to pattern length 
+};
+    
 
 void arpTransposeLoopClear()
 {
@@ -1049,8 +1061,10 @@ void arpInit()
   arpChordLength = 0;
   arpNotesHeld = 0;
   arpPatternLength = 16;
+  arpConstrainToPatternLength = 0;
   arpRefresh = 0;
   arpRebuild = 0;
+  arpDelayRebuild = 1;
   arpStopNote = 0;
   arpGateLength = 10;
   arpSequenceLength = 0;
@@ -1073,7 +1087,7 @@ void arpInit()
 void arpClear()
 {
   arpChordLength = 0;
-  arpRebuild = 1;
+  arpRebuild = ARP_REBUILD_NOW;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1425,7 +1439,7 @@ void arpReadInput(unsigned long milliseconds)
         arpTransKey = ARP_TRANS_KEY_MIDI;
         if(arpChordBaseNote)
           arpTranspose = note - arpChordBaseNote;
-        arpRebuild=1;
+        arpRebuild=ARP_REBUILD_NOW;
         editRefreshTranspose();
       }
       else if(arpTransKey == ARP_TRANS_KEY_MIDI)
@@ -1468,7 +1482,10 @@ void arpReadInput(unsigned long milliseconds)
         {
           arpChordLength = 0;
           if(!!(uiHoldType & UI_HOLD_CHORD))
-            synchRestartSequenceOnNextBeat = 1;
+          {
+            if(!arpFlags & ARP_FLAG_HOLD_CONTINUE))
+              synchRestartSequenceOnNextBeat = 1;
+          }
           else
             synchRestart();
         }
@@ -1482,7 +1499,7 @@ void arpReadInput(unsigned long milliseconds)
           arpNotesHeld++;
 
           // flag that the arp sequence needs to be rebuilt
-          arpRebuild = 1;          
+          arpRebuild = ARP_REBUILD_PENDING;          
         }  
       }
     }
@@ -1518,7 +1535,7 @@ void arpReadInput(unsigned long milliseconds)
 
         // rebuild the sequence
         --arpChordLength;
-        arpRebuild = 1;
+        arpRebuild = ARP_REBUILD_PENDING;
       }
     }
   }
@@ -1545,13 +1562,18 @@ void arpRun(unsigned long milliseconds)
 {  
   int i;
 
-  unsigned long playIndex = synchPlayIndexBase + synchPlayIndex;
   
   // update the chord based on user input
   arpReadInput(milliseconds);
 
+  if(arpConstrainToPatternLength && synchPlayIndex >= arpPatternLength)
+       synchPlayIndex = 0;
+  unsigned long playIndex = synchPlayIndexBase + synchPlayIndex;
+  if(arpConstrainToPatternLength && arpPatternLength)
+      playIndex %= arpPatternLength;
+  
   if(synchPlayAdvance && arpTransposeLoopMode != ARP_TRANS_LOOP_OFF && arpPatternLength)
-  {    
+  {            
     int loopIndex = ((int)(0.5+(double)playIndex/4.0)) % (4*(arpTransposeLoopMode&0X0F));
     if(!!(arpTransposeLoopMode & ARP_TRANS_LOOP_REC) && (arpTransKey != ARP_TRANS_KEY_NONE))
     {
@@ -1561,15 +1583,31 @@ void arpRun(unsigned long milliseconds)
       arpTransposeLoop[loopIndex] != arpTranspose)
     {
         arpTranspose = arpTransposeLoop[loopIndex];
-        arpRebuild=1;
-        editRefreshTranspose();
-      
+        arpRebuild=ARP_REBUILD_NOW;
+        editRefreshTranspose();      
+    }
+  }
+  
+  if(arpRebuild == ARP_REBUILD_PENDING)
+  {
+    if(!arpSequenceLength)
+    {
+      arpRebuild = ARP_REBUILD_NOW;
+    }
+    else if(arpDelayRebuild)
+    {
+       if(!(playIndex % arpPatternLength))
+          arpRebuild = ARP_REBUILD_NOW;
+    }
+    else
+    {
+      arpRebuild = ARP_REBUILD_NOW;
     }
   }
   
   // see if user has changed a setting that would mean the
   // sequence needs to be rebuilt
-  if(arpRebuild)
+  if(arpRebuild == ARP_REBUILD_NOW)
   {
     if(ALL_NOTES_IN_CHORD == arpStopNote)
       arpStopAllNotesInChord(milliseconds);
@@ -1773,7 +1811,10 @@ void editPatternLength(char keyPress, byte forceRefresh)
   int i;
   if(keyPress >= 0 && keyPress <= 15)
   {
-    arpPatternLength = keyPress + 1;
+    if(arpPatternLength == keyPress + 1)
+      arpConstrainToPatternLength = !arpConstrainToPatternLength;
+    else
+      arpPatternLength = keyPress + 1;
     forceRefresh = 1;
   }
 
@@ -1781,7 +1822,7 @@ void editPatternLength(char keyPress, byte forceRefresh)
   {    
     uiClearLeds();
     uiSetLeds(0, arpPatternLength, LED_DIM);
-    uiLeds[arpPatternLength-1] = LED_BRIGHT;
+    uiLeds[arpPatternLength-1] = arpConstrainToPatternLength? LED_BLINK:LED_BRIGHT;
   }
 }
 
@@ -1800,7 +1841,7 @@ void editArpType(char keyPress, byte forceRefresh)
   case 5:
     arpRandSeed = random(256);
     arpType = keyPress;
-    arpRebuild = 1;
+    arpRebuild = ARP_REBUILD_NOW;
     forceRefresh = 1;
     break;
   case 13: 
@@ -1833,7 +1874,7 @@ void editOctaveShift(char keyPress, byte forceRefresh)
   if(keyPress >= 0 && keyPress <= 6)
   {
     arpOctaveShift = keyPress - 3;
-    arpRebuild = 1;
+    arpRebuild = ARP_REBUILD_NOW;
     forceRefresh = 1;
   }
 
@@ -1853,7 +1894,7 @@ void editOctaveSpan(char keyPress, byte forceRefresh)
   if(keyPress >= 0 && keyPress <= 3)
   {
     arpOctaveSpan = keyPress + 1;
-    arpRebuild = 1;
+    arpRebuild = ARP_REBUILD_NOW;
     forceRefresh = 1;
   }
 
@@ -2060,7 +2101,7 @@ void editInsertMode(char keyPress, byte forceRefresh)
   case 7:  
     arpRandSeed = random(256);
     arpInsertMode = keyPress;
-    arpRebuild = 1;
+    arpRebuild = ARP_REBUILD_NOW;
     forceRefresh = 1;
     break;
   case 10:
@@ -2080,7 +2121,7 @@ void editInsertMode(char keyPress, byte forceRefresh)
       }           
       arpChord[i] = ARP_MAKE_NOTE(note,64+random(64));
     }
-    arpRebuild = 1;
+    arpRebuild = ARP_REBUILD_NOW;
     break;
   case 11: // MIN7
     arpChord[0] = ARP_MAKE_NOTE(48,127);       
@@ -2088,7 +2129,7 @@ void editInsertMode(char keyPress, byte forceRefresh)
     arpChord[2] = ARP_MAKE_NOTE(55,127);
     arpChord[3] = ARP_MAKE_NOTE(58,127);
     arpChordLength = 4;
-    arpRebuild = 1;
+    arpRebuild = ARP_REBUILD_NOW;
     break;
   case 12: // MAJ7
     arpChord[0] = ARP_MAKE_NOTE(48,127);       
@@ -2096,7 +2137,7 @@ void editInsertMode(char keyPress, byte forceRefresh)
     arpChord[2] = ARP_MAKE_NOTE(55,127);
     arpChord[3] = ARP_MAKE_NOTE(59,127);
     arpChordLength = 4;
-    arpRebuild = 1;
+    arpRebuild = ARP_REBUILD_NOW;
     break;
   case 13: // DOM7
     arpChord[0] = ARP_MAKE_NOTE(48,127);       
@@ -2104,21 +2145,21 @@ void editInsertMode(char keyPress, byte forceRefresh)
     arpChord[2] = ARP_MAKE_NOTE(55,127);
     arpChord[3] = ARP_MAKE_NOTE(58,127);
     arpChordLength = 4;
-    arpRebuild = 1;
+    arpRebuild = ARP_REBUILD_NOW;
     break;
   case 14: // MIN
     arpChord[0] = ARP_MAKE_NOTE(48,127);       
     arpChord[1] = ARP_MAKE_NOTE(51,127);       
     arpChord[2] = ARP_MAKE_NOTE(55,127);       
     arpChordLength = 3;
-    arpRebuild = 1;
+    arpRebuild = ARP_REBUILD_NOW;
     break;
   case 15: // MAJ
     arpChord[0] = ARP_MAKE_NOTE(48,127);       
     arpChord[1] = ARP_MAKE_NOTE(52,127);       
     arpChord[2] = ARP_MAKE_NOTE(55,127);       
     arpChordLength = 3;
-    arpRebuild = 1;
+    arpRebuild = ARP_REBUILD_NOW;
     break;
   }
 
@@ -2299,7 +2340,7 @@ void editTranspose(char keyPress, byte forceRefresh)
   {
     arpTranspose = keyPress - 3;
     arpTransKey = ARP_TRANS_KEY_BUTTON;
-    arpRebuild = 1;
+    arpRebuild = ARP_REBUILD_NOW;
     forceRefresh = 1;
   }
 
@@ -2350,7 +2391,7 @@ void editForceToScale(char keyPress, byte forceRefresh)
       arpForceToScaleMask = ARP_SCALE_LOCRIAN; 
       break;            
     }
-    arpRebuild = 1;
+    arpRebuild = ARP_REBUILD_NOW;
     forceRefresh = 1;
   }
   else    
