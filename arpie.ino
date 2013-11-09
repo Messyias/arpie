@@ -61,7 +61,7 @@
 
 #define NO_VALUE (-1)
 #define DEBOUNCE_COUNT 50
-#define NOOP __asm__("nop\n\t")
+
 // Time in ms that counts as a long button press
 #define UI_LONG_HOLD_TIME 1500
 
@@ -151,9 +151,6 @@ ISR(TIMER2_OVF_vect)
       PORTD |= DBIT_UI_DATA;
       PORTD |= DBIT_UI_CLK;
     }
-
-    PORTC |= CBIT_UI_STROBE;      
-    NOOP;
 
     // Shift the bit along (NB we need to shift it once 
     // before it will appear at shift reg output 0)
