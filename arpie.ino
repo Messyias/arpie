@@ -785,7 +785,6 @@ void synchRestartSequence()
   synchPlayAdvance = 1;
   synchTicksToSend = 0;
   synchBeat = 1;  
-  synchFlags |= SYNCH_SEND_START;
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -794,6 +793,7 @@ void synchStart(byte source)
 {
   if(SYNCH_SOURCE_INPUT == source) synchFlags|=SYNCH_INPUT_RUNNING;
   if(SYNCH_SOURCE_AUX == source) synchFlags|=SYNCH_AUX_RUNNING;
+  synchFlags |= SYNCH_SEND_START;  
   synchRestartSequence();
 }
 
@@ -1989,6 +1989,7 @@ void editTempoSynch(char keyPress, byte forceRefresh)
     {
       synchFlags |= SYNCH_SEND_START;    // a start message will be sent to slaves
       synchFlags |= SYNCH_RESET_NEXT_STEP_TIME; // need to reset internal counter to ensure synch with slave
+      synchFlags |= SYNCH_SEND_START;
       synchSendMIDI = 1;
       synchRestartSequence();
     }
