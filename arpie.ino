@@ -1,25 +1,24 @@
 ////////////////////////////////////////////////////////////////////////////////
-//  
-//    ------------------------------------------
-//     AAAAA    RRRRRR    PPPPPP    II   EEEEEEE
-//    AA   AA   RR   RR   PP   PP   II   EE
-//    AAAAAAA   RRRRRR    PPPPPP    II   EEEE
-//    AA   AA   RR   RR   PP        II   EE
-//    AA   AA   RR   RR   PP        II   EEEEEEE
-//    ------------------------------------------
-//    MONOPHONIC MIDI ARPEGGIATOR
-//    hotchk155/2013
+//
+//                                  //
+//
+//      //////   //  //// //////    //    ////
+//            // ////     //    //  //  //    //
+//      //////// //       //    //  //  ////////
+//    //      // //       //    //  //  //
+//      //////   //       //////    //    ////
+//      MIDI ARPEGGIATOR  //
+//      hotchk155/2013    //
 //
 //    Revision History   
 //    1.00  16Apr13  Baseline 
 //    1.01  21Apr13  Improvements for MIDI thru control
 //    1.02  26Apr13  Synch source/input lockout options
 //    1.03  12May13  Fix issue with synch thru/change lockout blink rate
-// WORKING ON 1.03+
+//    1.04  09Nov13  Support MIDI stop/continue on external synch
 //
-////////////////////////////////////////////////////////////////////////////////
 #define VERSION_HI  1
-#define VERSION_LO  3
+#define VERSION_LO  4
 
 //
 // INCLUDE FILES
@@ -62,7 +61,7 @@
 
 #define NO_VALUE (-1)
 #define DEBOUNCE_COUNT 50
-
+#define NOOP __asm__("nop\n\t")
 // Time in ms that counts as a long button press
 #define UI_LONG_HOLD_TIME 1500
 
@@ -152,6 +151,9 @@ ISR(TIMER2_OVF_vect)
       PORTD |= DBIT_UI_DATA;
       PORTD |= DBIT_UI_CLK;
     }
+
+    PORTC |= CBIT_UI_STROBE;      
+    NOOP;
 
     // Shift the bit along (NB we need to shift it once 
     // before it will appear at shift reg output 0)
