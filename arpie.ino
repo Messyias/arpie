@@ -1,14 +1,14 @@
 ////////////////////////////////////////////////////////////////////////////////
-//  
-//    ------------------------------------------
-//     AAAAA    RRRRRR    PPPPPP    II   EEEEEEE
-//    AA   AA   RR   RR   PP   PP   II   EE
-//    AAAAAAA   RRRRRR    PPPPPP    II   EEEE
-//    AA   AA   RR   RR   PP        II   EE
-//    AA   AA   RR   RR   PP        II   EEEEEEE
-//    ------------------------------------------
-//    MONOPHONIC MIDI ARPEGGIATOR
-//    hotchk155/2013
+//
+//                                  //
+//
+//      //////   //  //// //////    //    ////
+//            // ////     //    //  //  //    //
+//      //////// //       //    //  //  ////////
+//    //      // //       //    //  //  //
+//      //////   //       //////    //    ////
+//      MIDI ARPEGGIATOR  //
+//      hotchk155/2014    //
 //
 //    Revision History   
 //    1.00  16Apr13  Baseline 
@@ -16,9 +16,12 @@
 //    1.02  26Apr13  Synch source/input lockout options
 //    1.03  12May13  Fix issue with synch thru/change lockout blink rate
 //
+//    A5a  Free up the sequence index from the synch index and allow grouping of notes in the 
+//         arpeggiated sequence (not used yet)
+//
 ////////////////////////////////////////////////////////////////////////////////
 #define VERSION_HI  1
-#define VERSION_LO  3
+#define VERSION_LO  5
 
 //
 // INCLUDE FILES
@@ -26,7 +29,7 @@
 #include <avr/interrupt.h>  
 #include <avr/io.h>
 #include <EEPROM.h>
-  
+
 ////////////////////////////////////////////////////////////////////////////////
 //
 //
@@ -911,6 +914,8 @@ void synchRun(unsigned long milliseconds)
 #define ARP_GET_VELOCITY(x) (((x)>>8)&0x7f)
 #define ARP_MAX_SEQUENCE 60
 #define ARP_NOTE_HELD 0x8000
+#define ARP_SEQ_GROUP (unsigned int)0x0080
+
 
 // Values for arpType
 enum 
@@ -948,8 +953,20 @@ int arpChordLength;        // number of notes in the chord
 int arpNotesHeld;          // number of notes physically held
 
 // ARPEGGIO SEQUENCE - the arpeggio build from chord/inserts etc
+// Each element in the sequence is stored as 
+//      1         0
+// 5432109876543210
+// xVVVVVVVGNNNNNNN
+//
+// V = Note velocity (1-127)
+// N = Midi note value (1-127)
+// G = Grouping notes (1=more notes in group)
+// x = Reserved
+// 
 unsigned int arpSequence[ARP_MAX_SEQUENCE];
 int arpSequenceLength;     // number of notes in the sequence
+int arpSequenceIndex;      // position of current note within the sequence
+unsigned long arpPlayingNotes[4]; // remember which notes are playing
 
 // NOTE PATTERN - the rythmic pattern of played/muted notes
 byte arpPattern[ARP_MAX_SEQUENCE];
@@ -958,10 +975,7 @@ byte arpPatternIndex;    // position in the pattern (for display)
 
 byte arpRefresh;  // whether the pattern index is changed
 
-// STOP NOTE - remembers which (single) note is playing
-// and when it should be stopped
-byte arpStopNote;
-unsigned long arpStopNoteTime;
+unsigned long arpStopNoteTime; // when to stop playing note(s)
 
 // used to time the length of a step
 unsigned long arpLastPlayAdvance;
@@ -985,15 +999,21 @@ void arpInit()
   arpPatternLength = 16;
   arpRefresh = 0;
   arpRebuild = 0;
-  arpStopNote = 0;
+//  arpStopNote = 0;
   arpGateLength = 10;
   arpSequenceLength = 0;
+  arpSequenceIndex = 0;
   arpLastPlayAdvance = 0;
   arpTranspose = 0;
   
   // the pattern starts with all beats on
   for(int i=0;i<16;++i)
     arpPattern[i] = 1;
+    
+  arpPlayingNotes[0] = 0;
+  arpPlayingNotes[1] = 0;
+  arpPlayingNotes[2] = 0;
+  arpPlayingNotes[3] = 0;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1382,11 +1402,43 @@ void arpReadInput(unsigned long milliseconds)
     arpClear();
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// START A NOTE PLAYING
+void arpStartNote(unsigned long *playingNotes, byte note, byte velocity, unsigned long milliseconds)
+{
+  note &= 0x7f;
+  playingNotes[note/32] |= ((unsigned long)1<<(note%32));
+  midiWrite(MIDI_MK_NOTE, note, velocity, 2, milliseconds);  
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// STOP ALL PLAYING NOTES
+void arpStopNotes(unsigned long *playingNotes, unsigned long milliseconds)
+{
+  for(int i=0; i<4; ++i)
+  {
+    if(!!(playingNotes[i]))
+    {
+      unsigned long mask = (unsigned long)1;
+      byte note = (byte)(i*32);
+      while(mask)
+      {
+        if(!!(playingNotes[i] & mask))
+        {
+          playingNotes[i] &= ~mask;
+          midiWrite(MIDI_MK_NOTE, note, 0, 2, milliseconds);
+        }
+        mask<<=1;
+        ++note;
+      }
+    }
+  }
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // RUN ARPEGGIATOR
 void arpRun(unsigned long milliseconds)
-{  
+{    
   // update the chord based on user input
   arpReadInput(milliseconds);
   
@@ -1406,8 +1458,13 @@ void arpRun(unsigned long milliseconds)
   // have we updated the play position?
   if(synchPlayAdvance && arpSequenceLength && arpPatternLength)
   {                 
+    byte isGrouped;
+    
+    if(arpSequenceIndex >= arpSequenceLength)
+      arpSequenceIndex = 0;
+          
     // get the index into the arpeggio sequence
-    int sequenceIndex = synchPlayIndex % arpSequenceLength;
+//    int sequenceIndex = synchPlayIndex % arpSequenceLength;
 
     // and the index into the pattern
     arpPatternIndex = synchPlayIndex % arpPatternLength;
@@ -1416,33 +1473,43 @@ void arpRun(unsigned long milliseconds)
     // point in the pattern
     if(arpPattern[arpPatternIndex])
     {
-      byte note = ARP_GET_NOTE(arpSequence[sequenceIndex]);
-      byte velocity = arpVelocityMode? arpVelocity : ARP_GET_VELOCITY(arpSequence[sequenceIndex]);        
-
-      // start the note playing
-      if(note > 0)
-        midiWrite(MIDI_MK_NOTE, note, velocity, 2, milliseconds);
-
-      // if the previous note is still playing then stop it
-      // (should be the case only for "tie" mode)
-      if(arpStopNote && arpStopNote != note)
-      {
-        midiWrite(MIDI_MK_NOTE, arpStopNote, 0, 2, milliseconds);
-      }
-
-      // need to work out the gate length for this note
-      arpStopNote = note;
+      // capture which notes are currently playing
+      unsigned long playingNotes[4];
+      memcpy(playingNotes, arpPlayingNotes, sizeof(playingNotes));
+      memset(arpPlayingNotes, 0, sizeof(arpPlayingNotes));
+      
+      // start group of notes playing
+      do {        
+        isGrouped = !!(arpSequence[arpSequenceIndex] & ARP_SEQ_GROUP);
+        byte note = ARP_GET_NOTE(arpSequence[arpSequenceIndex]);
+        byte velocity = arpVelocityMode? arpVelocity : ARP_GET_VELOCITY(arpSequence[arpSequenceIndex]);                
+        if(note > 0)
+          arpStartNote(arpPlayingNotes, note, velocity, milliseconds);
+        ++arpSequenceIndex;
+      } while(isGrouped && arpSequenceIndex < arpSequenceLength);
+      
+      // stop any notes that were playing before but which should not be 
+      // playing now
+      playingNotes[0] &= ~arpPlayingNotes[0];   
+      playingNotes[1] &= ~arpPlayingNotes[1];   
+      playingNotes[2] &= ~arpPlayingNotes[2];   
+      playingNotes[3] &= ~arpPlayingNotes[3];   
+      arpStopNotes(playingNotes, milliseconds);
+      
+      // need to work out the gate length for these notes
       if(arpGateLength)
-      {              
-        // Set the stop period to occur after a certain
-        arpStopNoteTime = milliseconds + (synchStepPeriod * arpGateLength) / 15;
-      }
-      else
-      {
-        // note till play till the next one starts
-        arpStopNoteTime = 0;               
-      }
+        arpStopNoteTime = milliseconds + (synchStepPeriod * arpGateLength) / 15;// Set the stop period 
+      else        
+        arpStopNoteTime = 0;// note till play till the next one starts
       arpLastPlayAdvance = milliseconds;
+    }
+    else
+    {
+      // skip over group of notes
+      do {        
+        isGrouped = !!(arpSequence[arpSequenceIndex] & ARP_SEQ_GROUP);
+        ++arpSequenceIndex;
+      } while(isGrouped && arpSequenceIndex < arpSequenceLength);
     }
 
     // need to update the arp display
@@ -1451,13 +1518,10 @@ void arpRun(unsigned long milliseconds)
   }
   // check if a note needs to be stopped.. either at end of playing or if there is no sequence
   // and we're in tied note mode
-  else if(arpStopNote && (
-    ((arpStopNoteTime && arpStopNoteTime < milliseconds) || 
-    (!arpStopNoteTime && !arpSequenceLength))))
+  else if((arpStopNoteTime && arpStopNoteTime < milliseconds) || 
+    (!arpStopNoteTime && !arpSequenceLength))
   {
-    // stop the ringing note
-    midiWrite(MIDI_MK_NOTE, arpStopNote, 0, 2, milliseconds);
-    arpStopNote = 0;
+    arpStopNotes(arpPlayingNotes, milliseconds);
     arpStopNoteTime = 0;
   }
 }
@@ -1994,10 +2058,10 @@ void editMidiOutputChannel(char keyPress, byte forceRefresh)
 {
   if(keyPress >= 0 && keyPress <= 15)
   {
-    if((midiSendChannel != keyPress) && arpStopNote)
+    if(midiSendChannel != keyPress)
     {
-      midiWrite(MIDI_MK_NOTE, arpStopNote, 0, 2, millis());
-      arpStopNote = 0;
+      arpStopNotes(arpPlayingNotes, millis());
+      arpStopNoteTime = 0;
     }
     midiSendChannel = keyPress;
     eepromSet(EEPROM_OUTPUT_CHAN, midiSendChannel);
